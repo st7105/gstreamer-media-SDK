@@ -6,3 +6,5 @@ gst_msdk.cbp
 gst_msdk.layout
 *.depend
 gst_msdk.depend
+/cmake-build-*/
+/.idea/
