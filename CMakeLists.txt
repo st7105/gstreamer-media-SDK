@@ -3,6 +3,8 @@ cmake_minimum_required (VERSION 3.0)
 # This project use C source code
 project (GstMfx C)
 
+list(APPEND CMAKE_MODULE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/cmake)
+
 include(CMakeDependentOption)
 
 option (DEBUG "Turn on debug build." OFF)
@@ -45,8 +47,8 @@ option (WITH_MSS_2016 "Build plugins for MSS 2016." OFF)
 
 option (MFX_VC1_PARSER "Build VC1 parser plugin" ON)
 
-include(${CMAKE_SOURCE_DIR}/cmake/ProjectInfo.cmake)
-include(${CMAKE_SOURCE_DIR}/cmake/ProjectConfig.cmake)
+include(ProjectInfo.cmake)
+include(ProjectConfig.cmake)
 
 if (DEBUG)
     set(CMAKE_BUILD_TYPE debug)
@@ -54,15 +56,13 @@ else()
     set(CMAKE_BUILD_TYPE release)
 endif()
 
-set(LIBRARY_OUTPUT_PATH "${PROJECT_BINARY_DIR}/lib/${CMAKE_BUILD_TYPE}")
-
 configure_file (
     "${PROJECT_SOURCE_DIR}/version.h.in"
     "${PROJECT_BINARY_DIR}/version.h"
     )
 
 include_directories(${PROJECT_BINARY_DIR})
-include_directories(${CMAKE_SOURCE_DIR})
+include_directories(${CMAKE_CURRENT_SOURCE_DIR})
 
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fPIC -std=gnu99 -Wall -fPIE")
 set(CMAKE_C_RELEASE_FLAGS "${CMAKE_C_RELEASE_FLAGS} -D_FORTIFY_SOURCE=2")
