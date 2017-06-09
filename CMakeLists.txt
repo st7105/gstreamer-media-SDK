@@ -47,8 +47,8 @@ option (WITH_MSS_2016 "Build plugins for MSS 2016." OFF)
 
 option (MFX_VC1_PARSER "Build VC1 parser plugin" ON)
 
-include(ProjectInfo.cmake)
-include(ProjectConfig.cmake)
+include(ProjectInfo)
+include(ProjectConfig)
 
 if (DEBUG)
     set(CMAKE_BUILD_TYPE debug)
