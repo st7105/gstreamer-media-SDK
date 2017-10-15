@@ -47,7 +47,7 @@ static const char gst_mfxdecode_sink_caps_str[] =
     GST_CAPS_CODEC ("video/x-h264, \
         alignment = (string) au, \
         profile = (string) { constrained-baseline, baseline, main, high }, \
-        stream-format = (string) byte-stream")
+        stream-format = (string) { avc, byte-stream }")
     GST_CAPS_CODEC ("video/x-h265, \
         alignment = (string) au, \
         profile = (string) { main, main-10 }, \
@@ -95,7 +95,7 @@ static const GstMfxCodecMap mfx_codec_map[] = {
       "video/x-h264, \
        alignment = (string) au, \
        profile = (string) { constrained-baseline, baseline, main, high }, \
-       stream-format = (string) byte-stream"},
+       stream-format = (string) { avc, byte-stream }"},
 #ifdef USE_HEVC_DECODER
   {"hevc", GST_RANK_PRIMARY + 3,
       "video/x-h265, \
@@ -305,12 +305,24 @@ gst_mfxdec_create (GstMfxDec * mfxdec, GstCaps * caps)
   GstMfxProfile profile = gst_mfx_profile_from_caps (caps);
   GstVideoInfo info;
   GstObject *parent;
+  GstBuffer *codec_data = NULL;
+  gboolean is_in_avc = FALSE;
 
   if (!gst_mfxdec_update_src_caps (mfxdec))
     return FALSE;
 
   if (!gst_video_info_from_caps (&info, mfxdec->srcpad_caps))
     return FALSE;
+
+  if (mfxdec->input_state) {
+    GstStructure *structure = gst_caps_get_structure (mfxdec->input_state->caps, 0);
+    if (structure && gst_structure_has_field_typed(structure, "stream-format",
+          G_TYPE_STRING)) {
+      const gchar *stream_format = gst_structure_get_string (structure, "stream-format");
+      is_in_avc = (stream_format != NULL) && (g_strcmp0(stream_format, "avc") == 0);
+    }
+    codec_data = mfxdec->input_state->codec_data;
+  }
 
   /* Increase async depth considerably when using decodebin to avoid
    * jerky video playback resulting from threading issues */
@@ -319,8 +331,8 @@ gst_mfxdec_create (GstMfxDec * mfxdec, GstCaps * caps)
     mfxdec->async_depth = 16;
   gst_object_replace (&parent, NULL);
 
-  mfxdec->decoder = gst_mfx_decoder_new (plugin->aggregator,
-      profile, &info, mfxdec->async_depth, mfxdec->live_mode);
+  mfxdec->decoder = gst_mfx_decoder_new (plugin->aggregator, profile, &info,
+      mfxdec->async_depth, mfxdec->live_mode, is_in_avc, codec_data);
   if (!mfxdec->decoder)
     return FALSE;
 

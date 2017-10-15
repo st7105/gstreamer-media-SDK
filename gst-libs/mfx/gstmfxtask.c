@@ -53,6 +53,11 @@ struct _GstMfxTask
   guint task_type;
   gboolean memtype_is_system;
   gboolean is_joined;
+
+  /* This variable use to handle re-use back VASurfaces */
+  gboolean soft_reinit;
+  mfxU16 backup_num_surfaces;
+  VASurfaceID *backup_surfaces;
 };
 
 static gint
@@ -108,6 +113,14 @@ gst_mfx_task_frame_alloc (mfxHDL pthis, mfxFrameAllocRequest * req,
     response_data->num_surfaces = req->NumFrameSuggested;
   }
 
+  if (task->soft_reinit && (response_data->num_surfaces != task->backup_num_surfaces)
+      && (info->FourCC != MFX_FOURCC_P8))
+    response_data->num_surfaces = task->backup_num_surfaces;
+  else if ((task->task_type & GST_MFX_TASK_DECODER) &&
+           info->Width < 1281 && info->Height < 721 &&
+           info->FrameRateExtN > 50)
+    response_data->num_surfaces += 5;
+
   num_surfaces = response_data->num_surfaces;
 
   response_data->mem_ids =
@@ -118,29 +131,39 @@ gst_mfx_task_frame_alloc (mfxHDL pthis, mfxFrameAllocRequest * req,
     goto error_allocate_memory;
 
   if (info->FourCC != MFX_FOURCC_P8) {
-    response_data->surfaces =
-        g_slice_alloc0 (num_surfaces * sizeof (VASurfaceID));
+    if (task->soft_reinit) {
+      if (task->backup_surfaces == NULL) {
+	GST_ERROR ("Failed reuse back VA surfaces");
+	goto error_allocate_memory;
+      }
+      response_data->surfaces = task->backup_surfaces;
+      task->soft_reinit = FALSE;
+      task->backup_num_surfaces = 0;
+      task->backup_surfaces = NULL;
+    } else {
+      response_data->surfaces =
+          g_slice_alloc0 (num_surfaces * sizeof (VASurfaceID));
 
-    if (!response_data->surfaces)
-      goto error_allocate_memory;
+      if (!response_data->surfaces)
+        goto error_allocate_memory;
 
-    fourcc = gst_mfx_video_format_to_va_fourcc (info->FourCC);
-    attrib.type = VASurfaceAttribPixelFormat;
-    attrib.flags = VA_SURFACE_ATTRIB_SETTABLE;
-    attrib.value.type = VAGenericValueTypeInteger;
-    attrib.value.value.i = fourcc;
+      fourcc = gst_mfx_video_format_to_va_fourcc (info->FourCC);
+      attrib.type = VASurfaceAttribPixelFormat;
+      attrib.flags = VA_SURFACE_ATTRIB_SETTABLE;
+      attrib.value.type = VAGenericValueTypeInteger;
+      attrib.value.value.i = fourcc;
 
-    GST_MFX_DISPLAY_LOCK (task->display);
-    sts = vaCreateSurfaces (GST_MFX_DISPLAY_VADISPLAY (task->display),
-        gst_mfx_video_format_to_va_format (info->FourCC),
-        req->Info.Width, req->Info.Height,
-        response_data->surfaces, num_surfaces, &attrib, 1);
-    GST_MFX_DISPLAY_UNLOCK (task->display);
-    if (!vaapi_check_status (sts, "vaCreateSurfaces ()")) {
-      GST_ERROR ("Error allocating VA surfaces %d", sts);
-      goto error_allocate_memory;
+      GST_MFX_DISPLAY_LOCK (task->display);
+      sts = vaCreateSurfaces (GST_MFX_DISPLAY_VADISPLAY (task->display),
+          gst_mfx_video_format_to_va_format (info->FourCC),
+          req->Info.Width, req->Info.Height,
+          response_data->surfaces, num_surfaces, &attrib, 1);
+      GST_MFX_DISPLAY_UNLOCK (task->display);
+      if (!vaapi_check_status (sts, "vaCreateSurfaces ()")) {
+        GST_ERROR ("Error allocating VA surfaces %d", sts);
+        goto error_allocate_memory;
+      }
     }
-
     for (i = 0; i < num_surfaces; i++) {
       mid = &response_data->mem_ids[i];
       mid->mid = &response_data->surfaces[i];
@@ -183,13 +206,20 @@ gst_mfx_task_frame_alloc (mfxHDL pthis, mfxFrameAllocRequest * req,
 
 error_allocate_memory:
   {
-    g_slice_free1 (num_surfaces * sizeof (VABufferID),
-        response_data->coded_buf);
-    g_slice_free1 (num_surfaces * sizeof (GstMfxMemoryId),
-        response_data->mem_ids);
-    g_slice_free1 (num_surfaces * sizeof (mfxMemId), response_data->mids);
-    g_slice_free1 (num_surfaces * sizeof (VASurfaceID),
-        response_data->surfaces);
+    if (response_data->coded_buf)
+      g_slice_free1 (num_surfaces * sizeof (VABufferID),
+          response_data->coded_buf);
+
+    if (response_data->mem_ids)
+      g_slice_free1 (num_surfaces * sizeof (GstMfxMemoryId),
+          response_data->mem_ids);
+
+    if (response_data->mids)
+      g_slice_free1 (num_surfaces * sizeof (mfxMemId), response_data->mids);
+
+    if (response_data->surfaces)
+      g_slice_free1 (num_surfaces * sizeof (VASurfaceID),
+          response_data->surfaces);
 
     return MFX_ERR_MEMORY_ALLOC;
   }
@@ -214,13 +244,18 @@ gst_mfx_task_frame_free (mfxHDL pthis, mfxFrameAllocResponse * resp)
   num_surfaces = response_data->num_surfaces;
 
   if (info->FourCC != MFX_FOURCC_P8) {
-    GST_MFX_DISPLAY_LOCK (task->display);
-    vaDestroySurfaces (GST_MFX_DISPLAY_VADISPLAY (task->display),
-        response_data->surfaces, num_surfaces);
-    GST_MFX_DISPLAY_UNLOCK (task->display);
+    if (task->soft_reinit) {
+      task->backup_num_surfaces = num_surfaces;
+      task->backup_surfaces = response_data->surfaces;
+    } else {
+      GST_MFX_DISPLAY_LOCK (task->display);
+      vaDestroySurfaces (GST_MFX_DISPLAY_VADISPLAY (task->display),
+          response_data->surfaces, num_surfaces);
+      GST_MFX_DISPLAY_UNLOCK (task->display);
 
-    g_slice_free1 (num_surfaces * sizeof (VASurfaceID),
-        response_data->surfaces);
+      g_slice_free1 (num_surfaces * sizeof (VASurfaceID),
+          response_data->surfaces);
+    }
   } else {
     for (i = 0; i < num_surfaces; i++) {
       GST_MFX_DISPLAY_LOCK (task->display);
@@ -475,6 +510,9 @@ gst_mfx_task_init (GstMfxTask * task, GstMfxTaskAggregator * aggregator,
       GST_MFX_DISPLAY_VADISPLAY (task->display));
 
   task->memtype_is_system = FALSE;
+  task->soft_reinit = FALSE;
+  task->backup_num_surfaces = 0;
+  task->backup_surfaces = NULL;
 }
 
 GstMfxTask *
@@ -534,4 +572,18 @@ gst_mfx_task_replace (GstMfxTask ** old_task_ptr, GstMfxTask * new_task)
       GST_MFX_MINI_OBJECT (new_task));
 }
 
+void
+gst_mfx_task_set_soft_reinit (GstMfxTask *task, gboolean reinit_status)
+{
+  g_return_if_fail (task != NULL);
 
+  task->soft_reinit = reinit_status;
+}
+
+gboolean
+gst_mfx_task_get_soft_reinit (GstMfxTask *task)
+{
+  g_return_val_if_fail (task != NULL, FALSE);
+
+  return task->soft_reinit;
+}
