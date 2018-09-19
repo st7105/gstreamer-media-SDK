@@ -22,7 +22,7 @@
 
 #include "sysdeps.h"
 
-#include <drm/drm_fourcc.h>
+#include <libdrm/drm_fourcc.h>
 #include "gstmfxtexture_egl.h"
 #include "gstmfxutils_egl.h"
 #include "gstmfxsurface_vaapi.h"
@@ -32,7 +32,6 @@
 #include "gstmfxutils_vaapi.h"
 
 #define DEBUG 1
-#include "gstmfxdebug.h"
 
 /**
  * GstMfxTextureEGL:
@@ -276,7 +275,8 @@ gst_mfx_texture_egl_ref (GstMfxTextureEGL * texture)
 {
   g_return_val_if_fail (texture != NULL, NULL);
 
-  return gst_mfx_mini_object_ref (GST_MFX_MINI_OBJECT (texture));
+  return (GstMfxTextureEGL *)
+      gst_mfx_mini_object_ref (GST_MFX_MINI_OBJECT (texture));
 }
 
 void

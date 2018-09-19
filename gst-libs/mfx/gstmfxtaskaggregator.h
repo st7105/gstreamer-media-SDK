@@ -21,6 +21,7 @@
 #ifndef GST_MFX_TASK_AGGREGATOR_H
 #define GST_MFX_TASK_AGGREGATOR_H
 
+#include "sysdeps.h"
 #include "gstmfxminiobject.h"
 #include "gstmfxdisplay.h"
 #include "gstmfxtask.h"
@@ -42,6 +43,10 @@ gst_mfx_task_aggregator_get_current_task (GstMfxTaskAggregator * aggregator);
 
 gboolean
 gst_mfx_task_aggregator_set_current_task (GstMfxTaskAggregator * aggregator,
+    GstMfxTask * task);
+
+void
+gst_mfx_task_aggregator_remove_current_task (GstMfxTaskAggregator * aggregator,
     GstMfxTask * task);
 
 void

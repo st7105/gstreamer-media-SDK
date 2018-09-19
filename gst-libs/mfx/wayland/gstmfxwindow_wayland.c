@@ -24,6 +24,7 @@
 
 #include "sysdeps.h"
 
+#include <gst/gst.h>
 #include <wayland-client.h>
 #include <wayland-egl.h>
 #include "gstmfxwindow_wayland.h"
@@ -251,7 +252,7 @@ gst_mfx_window_wayland_render (GstMfxWindow * window,
       || (dst_rect->width != src_rect->width)) {
     if (priv->viewport) {
       wl_viewport_set_destination (priv->viewport,
-          dst_rect->width, dst_rect->height);
+          window->width, window->height);
     }
   }
 
@@ -294,7 +295,15 @@ gst_mfx_window_wayland_render (GstMfxWindow * window,
 
   GST_MFX_DISPLAY_LOCK (GST_MFX_WINDOW_DISPLAY (window));
   wl_surface_attach (priv->surface, buffer, 0, 0);
+
+#ifdef USE_WAYLAND_1_13
+  if (src_rect->width > dst_rect->width || src_rect->height > dst_rect->height)
+    wl_surface_damage (priv->surface, 0, 0, src_rect->width, src_rect->height);
+  else
+    wl_surface_damage (priv->surface, 0, 0, dst_rect->width, dst_rect->height);
+#else
   wl_surface_damage (priv->surface, 0, 0, dst_rect->width, dst_rect->height);
+#endif
 
   if (priv->opaque_region) {
     wl_surface_set_opaque_region (priv->surface, priv->opaque_region);
@@ -343,6 +352,8 @@ static void
 handle_configure (void *data, struct wl_shell_surface *shell_surface,
     uint32_t edges, int32_t width, int32_t height)
 {
+  GstMfxWindow * window = data;
+  gst_mfx_window_set_size(window, width, height);
 }
 
 static void
@@ -418,7 +429,7 @@ gst_mfx_window_wayland_create (GstMfxWindow * window,
       priv->event_queue);
 
   wl_shell_surface_add_listener (priv->shell_surface,
-      &shell_surface_listener, priv);
+      &shell_surface_listener, window);
   wl_shell_surface_set_toplevel (priv->shell_surface);
 
   if (priv_display->scaler) {
@@ -438,7 +449,7 @@ gst_mfx_window_wayland_create (GstMfxWindow * window,
     priv->egl_window = wl_egl_window_create (priv->surface, *width, *height);
     if (!priv->egl_window)
       return FALSE;
-    GST_MFX_WINDOW_ID (window) = priv->egl_window;
+    GST_MFX_WINDOW_ID (window) = GPOINTER_TO_INT(priv->egl_window);
   }
 #endif
   priv->thread = g_thread_try_new ("wayland-thread",
@@ -518,12 +529,22 @@ gst_mfx_window_wayland_resize (GstMfxWindow * window, guint width, guint height)
 
   GST_DEBUG ("resize window, new size %ux%u", width, height);
 
+  GST_MFX_DISPLAY_LOCK (GST_MFX_WINDOW_DISPLAY (window));
+
+  if (priv->viewport) {
+    wl_viewport_set_destination (priv->viewport, width, height);
+  }
+
+  wl_surface_damage (priv->surface, 0, 0, width, height);
+  wl_surface_commit (priv->surface);
+
   if (priv->opaque_region)
     wl_region_destroy (priv->opaque_region);
-  GST_MFX_DISPLAY_LOCK (GST_MFX_WINDOW_DISPLAY (window));
+
   priv->opaque_region = wl_compositor_create_region (priv_display->compositor);
-  GST_MFX_DISPLAY_UNLOCK (GST_MFX_WINDOW_DISPLAY (window));
   wl_region_add (priv->opaque_region, 0, 0, width, height);
+
+  GST_MFX_DISPLAY_UNLOCK (GST_MFX_WINDOW_DISPLAY (window));
 
   return TRUE;
 }

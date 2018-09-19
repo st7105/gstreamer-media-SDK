@@ -11,6 +11,7 @@ option (DEBUG "Turn on debug build." OFF)
 
 option (MFX_DECODER "Build MSDK decoder plugins." ON)
 option (USE_HEVC_DECODER "Build MSDK decoder plugin with HEVC support." ON)
+option (USE_HEVC_10BIT_DECODER "Build MSDK decoder plugin with HEVC 10bit support." OFF)
 option (USE_VP8_DECODER "Build MSDK decoder plugin with VP8 support." ON)
 option (USE_VP9_DECODER "Build MSDK decoder plugin with VP9 support." OFF)
 
@@ -19,10 +20,9 @@ CMAKE_DEPENDENT_OPTION(MFX_H264_ENCODER  "Build H.264 encoder plugin" ON
     "MFX_ENCODER" OFF)
 CMAKE_DEPENDENT_OPTION(MFX_H265_ENCODER  "Build H.265 encoder plugin" ON
     "MFX_ENCODER" OFF)
-CMAKE_DEPENDENT_OPTION(MFX_MPEG2_ENCODER "Build MPEG2 encoder plugin" ON
-    "MFX_ENCODER" OFF)
 CMAKE_DEPENDENT_OPTION(MFX_JPEG_ENCODER  "Build JPEG encoder plugin"  ON
     "MFX_ENCODER" OFF)
+option (MFX_MPEG2_ENCODER "Build MPEG2 encoder plugin" OFF)
 
 option (MFX_VPP "Build MSDK VPP plugin." ON)
 
@@ -64,8 +64,16 @@ configure_file (
 include_directories(${PROJECT_BINARY_DIR})
 include_directories(${CMAKE_CURRENT_SOURCE_DIR})
 
-set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fPIC -std=gnu99 -Wall -fPIE")
-set(CMAKE_C_RELEASE_FLAGS "${CMAKE_C_RELEASE_FLAGS} -D_FORTIFY_SOURCE=2")
+if (CMAKE_C_COMPILER_VERSION VERSION_GREATER 4.9)
+set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fPIC -std=gnu99 -Wall -fPIE -fstack-protector-strong")
+else()
+set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fPIC -std=gnu99 -Wall -fPIE -fstack-protector")
+endif()
+
+set(CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS} -D_FORTIFY_SOURCE=2 -O2")
+set(CMAKE_C_FLAGS_DEBUG "${CMAKE_C_FLAGS} -g -ggdb -O0")
+
+set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -z noexecstack -z relro -z now")
 
 include_directories(
     gst/mfx
@@ -73,7 +81,7 @@ include_directories(
     parsers)
 
 if (CMAKE_INSTALL_PREFIX_INITIALIZED_TO_DEFAULT)
-    set (CMAKE_INSTALL_PREFIX "${GSTREAMER_LIBDIR}/gstreamer-1.0")
+    set (CMAKE_INSTALL_PREFIX "${GSTREAMER_LIBDIR}")
 endif()
 
 SET(CMAKE_SKIP_BUILD_RPATH  FALSE)
@@ -81,8 +89,6 @@ SET(CMAKE_SKIP_BUILD_RPATH  FALSE)
 # when building, don't use the install RPATH already
 # (but later on when installing)
 SET(CMAKE_BUILD_WITH_INSTALL_RPATH FALSE) 
-
-SET(CMAKE_INSTALL_RPATH "${CMAKE_INSTALL_PREFIX}")
 
 # add the automatically determined parts of the RPATH
 # which point to directories outside the build tree to the install RPATH
@@ -110,7 +116,7 @@ configure_file("${CMAKE_CURRENT_SOURCE_DIR}/cmake/cmake_uninstall.cmake.in" "${C
 add_custom_target(uninstall "${CMAKE_COMMAND}" -P "${CMAKE_BINARY_DIR}/cmake_uninstall.cmake")
 
 install (TARGETS gstmfx
-    LIBRARY DESTINATION ${CMAKE_INSTALL_PREFIX}
-    RUNTIME DESTINATION ${CMAKE_INSTALL_PREFIX})
+    LIBRARY DESTINATION gstreamer-1.0
+    RUNTIME DESTINATION bin)
 
 message("Build: " ${CMAKE_BUILD_TYPE})

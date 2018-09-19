@@ -25,6 +25,7 @@
 #include "gstmfxtask.h"
 #include "gstmfxutils_vaapi.h"
 #include "video-format.h"
+#include "gstmfxvideometa.h"
 
 G_BEGIN_DECLS
 
@@ -33,7 +34,8 @@ G_BEGIN_DECLS
 typedef struct _GstMfxSurfaceVaapi GstMfxSurfaceVaapi;
 
 GstMfxSurface *
-gst_mfx_surface_vaapi_new (GstMfxDisplay * display, const GstVideoInfo * info);
+gst_mfx_surface_vaapi_new (GstMfxDisplay * display, const GstVideoInfo * info,
+   GstMfxVideoMeta *meta);
 
 GstMfxSurface *
 gst_mfx_surface_vaapi_new_from_task(GstMfxTask * task);

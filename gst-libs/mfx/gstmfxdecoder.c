@@ -18,17 +18,22 @@
  *  Boston, MA 02110-1301 USA
  */
 
+#include <stdint.h>
 #include <mfxplugin.h>
 #include <mfxvp8.h>
+#include <gst/codecparsers/gsth264parser.h>
 
 #include "gstmfxdecoder.h"
 #include "gstmfxfilter.h"
 #include "gstmfxsurfacepool.h"
 #include "gstmfxsurface.h"
 #include "gstmfxtask.h"
+#include "gstmfxutils_h264.h"
 
 #define DEBUG 1
 #include "gstmfxdebug.h"
+
+#define NAL_UNITTYPE_BITS 0X1F
 
 struct _GstMfxDecoder
 {
@@ -63,6 +68,7 @@ struct _GstMfxDecoder
   gboolean skip_corrupted_frames;
   gboolean can_double_deinterlace;
   gboolean is_avc;
+  gboolean sync_out_surf;
   guint num_partial_frames;
 
   /* For special double frame rate deinterlacing case */
@@ -210,7 +216,7 @@ gst_mfx_decoder_finalize (GstMfxDecoder * decoder)
 static mfxStatus
 gst_mfx_decoder_configure_plugins (GstMfxDecoder * decoder)
 {
-  mfxStatus sts;
+  mfxStatus sts = MFX_ERR_NONE;
 
   switch (decoder->params.mfx.CodecId) {
     case MFX_CODEC_HEVC: {
@@ -283,8 +289,23 @@ gst_mfx_decoder_set_video_properties (GstMfxDecoder * decoder)
   frame_info->CropH = decoder->info.height;
   frame_info->FrameRateExtN = decoder->info.fps_n;
   frame_info->FrameRateExtD = decoder->info.fps_d;
+
   frame_info->AspectRatioW = decoder->info.par_n;
   frame_info->AspectRatioH = decoder->info.par_d;
+
+  if ((decoder->info.par_n > UINT16_MAX) && (decoder->info.par_d > UINT16_MAX)) {
+    gint tmp_ratioW = decoder->info.par_n;
+    gint tmp_ratioH = decoder->info.par_d;
+
+    do {
+      tmp_ratioW = tmp_ratioW >> 4;
+      tmp_ratioH = tmp_ratioH >> 4;
+    } while ((tmp_ratioW > UINT16_MAX) || (tmp_ratioH > UINT16_MAX));
+
+    frame_info->AspectRatioW = tmp_ratioW;
+    frame_info->AspectRatioH = tmp_ratioH;
+  }
+
   frame_info->BitDepthChroma = 8;
   frame_info->BitDepthLuma = 8;
 
@@ -362,111 +383,190 @@ error_query_request:
   }
 }
 
-static void
-gst_mfx_decoder_convert_avc_stream (GstMfxDecoder * decoder, guint8 * cdata,
+static gboolean
+gst_mfx_decoder_is_avc_intra (GstMfxDecoder * decoder, guint8 * cdata,
     gint size)
 {
-  guint8 startcode[4] = {0, 0, 0, 1};
+  gboolean have_intra = FALSE;
 
   if (!decoder || !cdata || !size)
-    return;
+    return FALSE;
 
   gint32 offset = 0;
   gint32 packet_size = 0;
 
-  while (offset < size) {
+  while (offset < (size - 8)) {
     packet_size = GST_READ_UINT32_BE(&cdata[offset]);
 
     offset += 4;
+    switch (cdata[offset] & 0x1f) {
+    case GST_H264_NAL_SLICE:
+      have_intra = gst_mfx_utils_h264_is_slice_intra (
+                       &cdata[offset], size - offset);
+      break;
+    case GST_H264_NAL_SLICE_IDR:
+      have_intra = TRUE;
+      break;
+    }
+    offset += packet_size;
+
+    if (have_intra) break;
+  }
+
+  return have_intra;
+}
+
+static gboolean
+gst_mfx_decoder_convert_avc_stream (GstMfxDecoder * decoder, guint8 * cdata,
+    gint size, gboolean drop_ps)
+{
+  guint8 startcode[4] = {0, 0, 0, 1}, nal_unit_type = 0;
+  gint32 offset = 0, packet_size = 0;
+
+  if (!decoder || !cdata || !size)
+    return FALSE;
+
+  while (offset < size) {
+    packet_size = GST_READ_UINT32_BE(&cdata[offset]);
+    nal_unit_type = (GstH264NalUnitType)(GST_READ_UINT8(&cdata[offset += 4]) &
+                                    NAL_UNITTYPE_BITS);
+
     if (offset + packet_size > size) break;
 
-    decoder->bitstream = g_byte_array_append (decoder->bitstream,
-        startcode, 4);
-    decoder->bitstream = g_byte_array_append (decoder->bitstream,
-        &cdata[offset], packet_size);
+    /* Avoid mutiple SPS/PPS NAL reinsertion when stream-format=avc. Forced
+     * to insert only the first SPS/PPS to fix some video corruption issue.
+     * Issue: Gst-play has all the multiple SPS/PPS inserted but not when
+     * running with gst-launch.
+     */
+    switch (nal_unit_type)
+    {
+      case GST_H264_NAL_SPS:
+      case GST_H264_NAL_PPS:
+       if (drop_ps)  break;
+      default:
+        decoder->bitstream = g_byte_array_append (decoder->bitstream,
+            startcode, 4);
+        decoder->bitstream = g_byte_array_append (decoder->bitstream,
+            &cdata[offset], packet_size);
+
+        decoder->bs.DataLength += (packet_size + 4);
+        break;
+    };
 
     offset += packet_size;
   }
 
   if (offset != size) {
-    GST_ERROR ("AVC stream error, size %d, processed offset %d.",
-        size, offset);
+    GST_ERROR ("AVC stream error, size %d, processed offset %d.", size, offset);
+    return FALSE;
   }
+
+  return TRUE;
 }
 
 static gboolean
-gst_mfx_decoder_get_codec_data (GstMfxDecoder * decoder, GstBuffer * codec_data)
+gst_mfx_decoder_handle_avc_codec_data (GstMfxDecoder * decoder,
+    GstBuffer * codec_data)
 {
-  gboolean res = FALSE;
+  GstMapInfo minfo;
+
   if (decoder->params.mfx.CodecId != MFX_CODEC_AVC || !decoder->is_avc ||
       !codec_data) {
-    return res;
+    return FALSE;
   }
-
-  GstMapInfo minfo;
 
   gst_buffer_map(codec_data, &minfo, GST_MAP_READ);
 
   if (minfo.size) {
+    guint8 startcode[4] = {0, 0, 0, 1}, nals_cnt = 0, nal_unit_type = 0;
+    guint16 packet_size = 0, offset = 5;
+    gchar *msgs[] = { "SPS", "PPS", NULL };
+
+    guint8 *cdata = minfo.data;
+    guint8 profile = ((decoder->params.mfx.CodecId ^ decoder->profile) & 0xFF);
+
     decoder->codec_data = g_byte_array_sized_new (minfo.size);
 
-    guint8 startcode[4] = {0, 0, 0, 1}, nals_cnt = 0, i = 0, j = 0;
-    guint8 profile = ((decoder->params.mfx.CodecId ^ decoder->profile) & 0xff);
-    guint8 *cdata = minfo.data;
-    guint16 nal_size = 0, offset = 0;
-    gchar *msgs[2] = { "SPS", "PPS" };
-
+    /* Ensure codec header is valid */
     if (minfo.size < 8) {
-      GST_ERROR ("Codec data not enought information.\n");
+      GST_ERROR ("Codec data not enough information.\n");
       goto error;
-    }
-
-    if ((cdata[0] != 1) && (cdata[2] != profile)) {
-      GST_ERROR ("Codec data header error.\n");
-      goto error;
-    }
-
-    offset = 5;
-
-    for (i = 0; i < 2; ++i ) {
-      if (offset >= minfo.size) {
-        GST_ERROR ("Codec data does not contain %s packets.\n", msgs[i]);
+    } else {
+      if ((cdata[0] != 1) && (cdata[2] != profile)) {
+        GST_ERROR ("Codec data header error.\n");
         goto error;
       }
+    }
 
-      nals_cnt = cdata[offset] & 0x1f;
-      ++offset;
-      for (j = 0; j < nals_cnt; ++j ) {
-        nal_size = GST_READ_UINT16_BE(&cdata[offset]);
-        offset += 2;
-        if (offset + nal_size > minfo.size) {
-          GST_ERROR ("Codec data %s broken.\n", msgs[i]);
-          goto error;
+    for (gchar **pchar = msgs; *pchar != NULL; pchar++) {
+      if (offset > minfo.size) {
+        GST_ERROR ("Codec data does not contain %s packets.\n", *pchar);
+        goto error;
+      } else if (offset == minfo.size)
+	break;
+
+      nals_cnt = (cdata[offset++] & NAL_UNITTYPE_BITS);
+
+      for (guint cnt = 0; cnt < nals_cnt; cnt++) {
+
+        packet_size = GST_READ_UINT16_BE(&cdata[offset]);
+        nal_unit_type = (GstH264NalUnitType)(GST_READ_UINT8(&cdata[(offset += 2)]) &
+                         NAL_UNITTYPE_BITS);
+
+        if (offset + packet_size > minfo.size) {
+	  GST_ERROR ("Codec data %s broken.\n", *pchar);
+	  goto error;
         }
 
-        // Only need first set of SPS/PPS.
-        if (j < 1) {
-          decoder->codec_data = g_byte_array_append (decoder->codec_data,
-              startcode, 4);
-          decoder->codec_data = g_byte_array_append (decoder->codec_data,
-              &cdata[offset], nal_size);
-	}
-        offset += nal_size;
+        /* Only insert first SPS/PPS */
+        switch (nal_unit_type)
+        {
+            case GST_H264_NAL_SPS:
+            case GST_H264_NAL_PPS:
+              if (!cnt) {
+                decoder->codec_data = g_byte_array_append (decoder->codec_data,
+                    startcode, 4);
+                decoder->codec_data = g_byte_array_append (decoder->codec_data,
+                    &cdata[offset], packet_size);
+
+               /* Check the number of max_dec_frame_buffering in SPS. If it is too
+                * high, then will have to sync the output surface to avoid surface
+                * overwritten.
+                */
+                if (GST_H264_NAL_SPS == nal_unit_type) {
+                  GstH264NalUnit nalu;
+                  GstH264SPS sps;
+
+                  memset(&nalu, 0, sizeof(nalu));
+                  nalu.offset = 4;
+                  nalu.header_bytes = 1;
+                  nalu.data = decoder->codec_data->data;
+                  nalu.size = decoder->codec_data->len;
+
+                  if (GST_H264_PARSER_OK == gst_h264_parse_sps(&nalu, &sps, TRUE) &&
+                    sps.vui_parameters_present_flag &&
+                    sps.vui_parameters.max_dec_frame_buffering == 16)
+                        decoder->sync_out_surf = TRUE;
+                }
+              }
+	      break;
+        };
+
+        offset += packet_size;
       }
     }
 
     if (offset != minfo.size) {
-      GST_WARNING ("Codec data mismatch, size %d, processed offset %d.",
-          minfo.size, offset);
+      GST_WARNING ("Codec data mismatch, size %ld, processed offset %d.", minfo.size, offset);
     }
-
-    res = TRUE;
   }
+
+  gst_buffer_unmap(codec_data, &minfo);
+  return TRUE;
 
 error:
   gst_buffer_unmap(codec_data, &minfo);
-
-  return res;
+  return FALSE;
 }
 
 static gboolean
@@ -493,13 +593,14 @@ gst_mfx_decoder_init (GstMfxDecoder * decoder,
 
   decoder->params.IOPattern = MFX_IOPATTERN_OUT_VIDEO_MEMORY;
   decoder->inited = FALSE;
+  decoder->sync_out_surf = FALSE;
   decoder->bs.MaxLength = 1024 * 16;
   decoder->bitstream = g_byte_array_sized_new (decoder->bs.MaxLength);
   if (!decoder->bitstream)
     return FALSE;
 
   decoder->is_avc = is_avc;
-  if (is_avc && !gst_mfx_decoder_get_codec_data(decoder, codec_data))
+  if (is_avc && !gst_mfx_decoder_handle_avc_codec_data(decoder, codec_data))
     goto error_init;
 
   decoder->pts_offset = GST_CLOCK_TIME_NONE;
@@ -542,7 +643,8 @@ gst_mfx_decoder_new (GstMfxTaskAggregator * aggregator,
 
   g_return_val_if_fail (aggregator != NULL, NULL);
 
-  decoder = gst_mfx_mini_object_new0 (gst_mfx_decoder_class ());
+  decoder = (GstMfxDecoder *)
+              gst_mfx_mini_object_new0 (gst_mfx_decoder_class ());
   if (!decoder)
     goto error;
 
@@ -552,7 +654,7 @@ gst_mfx_decoder_new (GstMfxTaskAggregator * aggregator,
 
   return decoder;
 error:
-  gst_mfx_mini_object_unref (decoder);
+  gst_mfx_mini_object_unref (GST_MFX_MINI_OBJECT(decoder));
   return NULL;
 }
 
@@ -561,7 +663,8 @@ gst_mfx_decoder_ref (GstMfxDecoder * decoder)
 {
   g_return_val_if_fail (decoder != NULL, NULL);
 
-  return gst_mfx_mini_object_ref (GST_MFX_MINI_OBJECT (decoder));
+  return (GstMfxDecoder *)
+           gst_mfx_mini_object_ref (GST_MFX_MINI_OBJECT (decoder));
 }
 
 void
@@ -585,11 +688,11 @@ gst_mfx_decoder_start (GstMfxDecoder * decoder)
 {
   GstMfxDecoderStatus ret = GST_MFX_DECODER_STATUS_SUCCESS;
   mfxStatus sts = MFX_ERR_NONE;
+  mfxVideoParam params = decoder->params;
 
   /* Retrieve sequence header / layer data for MPEG2 and VC1 */
   if (decoder->params.mfx.CodecId == MFX_CODEC_VC1
       || decoder->params.mfx.CodecId == MFX_CODEC_MPEG2) {
-    mfxVideoParam params = decoder->params;
     guint8 sps_data[128];
 
     mfxExtCodingOptionSPSPPS extradata = {
@@ -617,6 +720,14 @@ gst_mfx_decoder_start (GstMfxDecoder * decoder)
       decoder->codec_data = g_byte_array_sized_new (extradata.SPSBufSize);
       decoder->codec_data = g_byte_array_append (decoder->codec_data,
           sps_data, extradata.SPSBufSize);
+    }
+  } else if (decoder->params.mfx.CodecId == MFX_CODEC_AVC) {
+    sts = MFXVideoDECODE_DecodeHeader (decoder->session, &decoder->bs, &params);
+    if (MFX_ERR_MORE_DATA == sts) {
+      return GST_MFX_DECODER_STATUS_ERROR_MORE_DATA;
+    } else if (sts < 0) {
+      GST_ERROR ("Decode header error %d\n", sts);
+      return GST_MFX_DECODER_STATUS_ERROR_BITSTREAM_PARSER;
     }
   }
 
@@ -803,10 +914,10 @@ queue_output_frame (GstMfxDecoder * decoder, GstMfxSurface * surface)
     out_frame = new_frame (decoder);
 
   gst_video_codec_frame_set_user_data(out_frame,
-      gst_mfx_surface_ref (surface), gst_mfx_surface_unref);
+      gst_mfx_surface_ref (surface), (GDestroyNotify) gst_mfx_surface_unref);
   g_queue_push_head(&decoder->decoded_frames, out_frame);
 
-  GST_LOG ("decoded frame : %ld",
+  GST_LOG ("decoded frame : %u",
     GST_MFX_SURFACE_FRAME_SURFACE (surface)->Data.FrameOrder);
 }
 
@@ -831,6 +942,10 @@ gst_mfx_decoder_decode (GstMfxDecoder * decoder,
   mfxSyncPoint syncp;
   mfxStatus sts = MFX_ERR_NONE;
 
+  if(!GST_CLOCK_TIME_IS_VALID(frame->pts)) {
+   frame->pts = frame->dts;
+  }
+
   if (!GST_CLOCK_TIME_IS_VALID(decoder->pts_offset)
       && GST_VIDEO_CODEC_FRAME_IS_SYNC_POINT (frame)
       && GST_CLOCK_TIME_IS_VALID (frame->pts))
@@ -850,14 +965,33 @@ gst_mfx_decoder_decode (GstMfxDecoder * decoder,
 
         sts = MFXVideoDECODE_DecodeHeader (decoder->session, &decoder->bs,
                 &decoder->params);
+        GST_DEBUG ("MFXVideoDECODE_DecodeHeader status: %d", sts);
         memset (&decoder->bs, 0, sizeof (mfxBitstream));
-        if (MFX_ERR_MORE_DATA == sts) {
-          decoder->bitstream = g_byte_array_append (decoder->bitstream,
-            decoder->codec_data->data, decoder->codec_data->len);
-          decoder->bs.DataLength = decoder->codec_data->len;
-          decoder->bs.MaxLength = decoder->bs.DataLength;
-          decoder->bs.Data = decoder->bitstream->data;
+      } else if (MFX_CODEC_AVC == decoder->params.mfx.CodecId && decoder->is_avc) {
+        if (!gst_mfx_decoder_is_avc_intra (decoder, minfo.data, minfo.size)) {
+          frame->pts = GST_CLOCK_TIME_NONE;
+          GST_VIDEO_CODEC_FRAME_SET_DECODE_ONLY(frame);
+          g_queue_push_head(&decoder->decoded_frames, frame);
+          goto end;
         }
+        gst_mfx_decoder_convert_avc_stream (decoder, minfo.data, minfo.size, FALSE);
+        decoder->bs.MaxLength = decoder->bs.DataLength = decoder->bitstream->len;
+        decoder->bs.Data = decoder->bitstream->data;
+
+        sts = MFXVideoDECODE_DecodeHeader (decoder->session, &decoder->bs,
+                &decoder->params);
+        GST_DEBUG ("MFXVideoDECODE_DecodeHeader status: %d", sts);
+        g_byte_array_remove_range (decoder->bitstream, 0,
+          decoder->bitstream->len);
+        memset (&decoder->bs, 0, sizeof (mfxBitstream));
+      }
+
+      if (MFX_ERR_MORE_DATA == sts) {
+        decoder->bitstream = g_byte_array_append (decoder->bitstream,
+          decoder->codec_data->data, decoder->codec_data->len);
+        decoder->bs.DataLength = decoder->codec_data->len;
+        decoder->bs.MaxLength = decoder->bs.DataLength;
+        decoder->bs.Data = decoder->bitstream->data;
       }
       decoder->was_reset = FALSE;
     }
@@ -886,8 +1020,10 @@ gst_mfx_decoder_decode (GstMfxDecoder * decoder,
         decoder->bs.Data = decoder->bitstream->data;
       }
 
-      gst_mfx_decoder_convert_avc_stream (decoder, minfo.data, minfo.size);
-      decoder->bs.DataLength += minfo.size;
+      if (!gst_mfx_decoder_convert_avc_stream (
+            decoder, minfo.data, minfo.size, !decoder->inited))
+        GST_ERROR ("Error in %s !", __func__);
+
       decoder->bs.MaxLength = decoder->bitstream->len;
       decoder->bs.Data = decoder->bitstream->data;
     } else {
@@ -1066,7 +1202,7 @@ gst_mfx_decoder_flush (GstMfxDecoder * decoder)
   GstMfxSurface *surface, *filter_surface;
   mfxFrameSurface1 *insurf, *outsurf = NULL;
   mfxSyncPoint syncp;
-  mfxStatus sts;
+  mfxStatus sts = MFX_ERR_NONE;
 
   g_return_val_if_fail(decoder != NULL, GST_MFX_DECODER_STATUS_FLUSHED);
 
@@ -1107,4 +1243,10 @@ gst_mfx_decoder_flush (GstMfxDecoder * decoder)
     ret = GST_MFX_DECODER_STATUS_FLUSHED;
   }
   return ret;
+}
+
+gboolean
+gst_mfx_decoder_need_sync_surface_out (GstMfxDecoder * decoder)
+{
+  return decoder->sync_out_surf;
 }

@@ -342,7 +342,7 @@ gst_vc1_parse_renegotiate (GstMfxVC1Parse * vc1parse)
   vc1parse->renegotiate = FALSE;
   vc1parse->update_caps = TRUE;
 
-  GST_INFO_OBJECT (vc1parse, "input %s/%s, negotiated %s/%s with downstream",
+  GST_INFO_OBJECT (vc1parse, "input %s/%s, negotiated %s with downstream",
       header_format_to_string (vc1parse->input_header_format),
       stream_format_to_string (vc1parse->input_stream_format),
       stream_format_to_string (vc1parse->output_stream_format));
@@ -1368,7 +1368,6 @@ gst_vc1_parse_pre_push_frame (GstBaseParse * parse, GstBaseParseFrame * frame)
     taglist = gst_tag_list_new_empty ();
 
     /* codec tag */
-    caps = gst_pad_get_current_caps (GST_BASE_PARSE_SRC_PAD (parse));
     gst_pb_utils_add_codec_description_to_tag_list (taglist,
         GST_TAG_VIDEO_CODEC, caps);
     gst_caps_unref (caps);
@@ -1867,6 +1866,7 @@ gst_vc1_parse_set_caps (GstBaseParse * parse, GstCaps * caps)
             header_format);
       vc1parse->input_header_format = VC1_HEADER_FORMAT_SEQUENCE_LAYER;
     } else {
+      gint offset;
       guint32 start_code;
       /* ASF, VC1 advanced profile
        * This should be the
@@ -1874,7 +1874,7 @@ gst_vc1_parse_set_caps (GstBaseParse * parse, GstCaps * caps)
        * 2) Sequence Header with startcode
        * 3) EntryPoint Header with startcode
        */
-      if (codec_data_size < 1 + 4 + 4 + 4 + 2) {
+      if (codec_data_size < 4 + 2) {
         GST_ERROR_OBJECT (vc1parse,
             "Too small for VC1 advanced profile ASF header");
         gst_buffer_unmap (codec_data, &minfo);
@@ -1883,29 +1883,39 @@ gst_vc1_parse_set_caps (GstBaseParse * parse, GstCaps * caps)
 
       /* Some sanity checking */
       if ((minfo.data[0] & 0x01) != 0x01) {
-        GST_ERROR_OBJECT (vc1parse,
+        GST_WARNING_OBJECT (vc1parse,
             "Invalid binding byte for VC1 advanced profile ASF header");
-        gst_buffer_unmap (codec_data, &minfo);
-        return FALSE;
+        offset = 0;
+      } else {
+        offset = 1;
       }
 
-      start_code = GST_READ_UINT32_BE (minfo.data + 1);
+      start_code = GST_READ_UINT32_BE (minfo.data + offset);
       if (start_code != 0x000010f) {
-        GST_ERROR_OBJECT (vc1parse,
+        GST_WARNING_OBJECT (vc1parse,
             "VC1 advanced profile ASF header does not start with SequenceHeader startcode");
-        gst_buffer_unmap (codec_data, &minfo);
-        return FALSE;
       }
 
-      if (!gst_vc1_parse_handle_bdus (vc1parse, codec_data, 1,
-              codec_data_size - 1)) {
+      if (!gst_vc1_parse_handle_bdus (vc1parse, codec_data, offset,
+              codec_data_size - offset)) {
         gst_buffer_unmap (codec_data, &minfo);
-        return FALSE;
+        if (!gst_vc1_parse_handle_bdu (vc1parse, GST_VC1_SEQUENCE, codec_data,
+            0, codec_data_size))
+          return FALSE;
+        gst_buffer_map (codec_data, &minfo, GST_MAP_READ);
       }
 
-      if (!vc1parse->seq_hdr_buffer || !vc1parse->entrypoint_buffer) {
+      if (!vc1parse->seq_hdr_buffer) {
         GST_ERROR_OBJECT (vc1parse,
-            "Need sequence header and entrypoint header in the codec_data");
+            "Need sequence header in the codec_data");
+        gst_buffer_unmap (codec_data, &minfo);
+        return FALSE;
+      }
+
+      if (vc1parse->profile == GST_VC1_PROFILE_ADVANCED
+          && !vc1parse->entrypoint_buffer) {
+         GST_ERROR_OBJECT (vc1parse,
+            "Need entrypoint header in the codec_data for advanced profile");
         gst_buffer_unmap (codec_data, &minfo);
         return FALSE;
       }

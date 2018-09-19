@@ -73,6 +73,9 @@ void
 gst_mfx_surface_replace (GstMfxSurface ** old_surface_ptr,
   GstMfxSurface * new_surface);
 
+void
+gst_mfx_surface_class_init (GstMfxSurfaceClass * klass);
+
 mfxFrameSurface1 *
 gst_mfx_surface_get_frame_surface (GstMfxSurface * surface);
 
@@ -109,6 +112,15 @@ gst_mfx_surface_map (GstMfxSurface * surface);
 
 void
 gst_mfx_surface_unmap (GstMfxSurface * surface);
+
+gboolean
+gst_mfx_surface_is_queued(GstMfxSurface * surface);
+
+void
+gst_mfx_surface_queue(GstMfxSurface * surface);
+
+void
+gst_mfx_surface_dequeue(GstMfxSurface * surface);
 
 G_END_DECLS
 

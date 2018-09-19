@@ -408,7 +408,7 @@ gst_mfxenc_handle_frame (GstVideoEncoder * venc, GstVideoCodecFrame * frame)
     goto error_buffer_no_surface;
 
   gst_video_codec_frame_set_user_data (frame,
-      gst_mfx_surface_ref (surface), gst_mfx_surface_unref);
+      gst_mfx_surface_ref (surface), (GDestroyNotify) gst_mfx_surface_unref);
 
   status = gst_mfx_encoder_encode (encode->encoder, frame);
   if (status < GST_MFX_ENCODER_STATUS_SUCCESS)
@@ -418,6 +418,7 @@ gst_mfxenc_handle_frame (GstVideoEncoder * venc, GstVideoCodecFrame * frame)
     goto done;
   }
   ret = gst_mfxenc_push_frame (encode, frame);
+  gst_mfx_surface_dequeue(surface);
 
 done:
   return ret;
@@ -456,7 +457,7 @@ gst_mfxenc_finish (GstVideoEncoder * venc)
   GstMfxEnc *const encode = GST_MFXENC_CAST (venc);
   GstMfxEncoderStatus status;
   GstVideoCodecFrame *frame;
-  GstFlowReturn ret;
+  GstFlowReturn ret = GST_FLOW_ERROR;
 
   /* Return "not-negotiated" error since this means we did not even reach
    * GstVideoEncoder::set_format () state, where the encoder could have

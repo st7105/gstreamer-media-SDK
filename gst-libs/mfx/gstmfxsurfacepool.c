@@ -171,7 +171,7 @@ gst_mfx_surface_pool_ref (GstMfxSurfacePool * pool)
 {
   g_return_val_if_fail (pool != NULL, NULL);
 
-  return gst_mfx_mini_object_ref (GST_MFX_MINI_OBJECT (pool));
+  return (GstMfxSurfacePool *) gst_mfx_mini_object_ref (GST_MFX_MINI_OBJECT (pool));
 }
 
 void
@@ -232,7 +232,7 @@ gst_mfx_surface_pool_get_surface_unlocked (GstMfxSurfacePool * pool)
     }
     else {
       if (!pool->memtype_is_system)
-        surface = gst_mfx_surface_vaapi_new(pool->display, &pool->info);
+        surface = gst_mfx_surface_vaapi_new(pool->display, &pool->info, NULL);
       else
         surface = gst_mfx_surface_new(&pool->info);
     }

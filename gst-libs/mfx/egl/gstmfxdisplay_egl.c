@@ -77,8 +77,8 @@ typedef struct
 static gboolean
 reset_context(GstMfxDisplayEGL * display, EGLContext gl_context)
 {
-  EglConfig *config;
-  EglContext *ctx;
+  EglConfig *config = NULL;
+  EglContext *ctx = NULL;
 
   egl_object_replace(&display->egl_context, NULL);
 
@@ -87,7 +87,7 @@ reset_context(GstMfxDisplayEGL * display, EGLContext gl_context)
   else {
     config = egl_config_new(display->egl_display, display->gles_version,
       GST_VIDEO_FORMAT_RGB);
-    if (!config)
+    if (config == NULL)
       return FALSE;
 
     ctx = egl_context_new(display->egl_display, config, NULL);
@@ -116,9 +116,11 @@ ensure_context_is_wrapped(GstMfxDisplayEGL * display, EGLContext gl_context)
 }
 
 static gboolean
-gst_mfx_display_egl_bind_display(GstMfxDisplayEGL * display,
-  const InitParams * params)
+gst_mfx_display_egl_bind_display(GstMfxDisplay * display,
+  gpointer  p_params)
 {
+  GstMfxDisplayEGL *mfxEGL_display = GST_MFX_DISPLAY_EGL(display);
+  const InitParams * params = (InitParams *) p_params;
   GstMfxDisplay *parent_display = NULL;
   EglDisplay *egl_display;
   const DisplayMap *m;
@@ -137,16 +139,16 @@ gst_mfx_display_egl_bind_display(GstMfxDisplayEGL * display,
 
   gst_mfx_display_use_opengl (parent_display);
 
-  gst_mfx_display_replace(&display->display, parent_display);
+  gst_mfx_display_replace(&mfxEGL_display->display, parent_display);
   gst_mfx_display_unref(parent_display);
 
-  egl_display = egl_display_new(GST_MFX_DISPLAY_HANDLE(display->display));
+  egl_display = egl_display_new(GST_MFX_DISPLAY_HANDLE(mfxEGL_display->display));
   if (!egl_display)
     return FALSE;
 
-  egl_object_replace(&display->egl_display, egl_display);
+  egl_object_replace(&mfxEGL_display->egl_display, egl_display);
   egl_object_unref(egl_display);
-  display->gles_version = params->gles_version;
+  mfxEGL_display->gles_version = params->gles_version;
   return TRUE;
 
   /* ERRORS */
@@ -156,31 +158,34 @@ error_unsupported_display_type:
 }
 
 static void
-gst_mfx_display_egl_close_display(GstMfxDisplayEGL * display)
+gst_mfx_display_egl_close_display(GstMfxDisplay * display)
 {
-  gst_mfx_display_replace(&display->display, NULL);
+  GstMfxDisplayEGL *mfxEGL_display = GST_MFX_DISPLAY_EGL(display);
+  gst_mfx_display_replace(&mfxEGL_display->display, NULL);
 }
 
 static void
-gst_mfx_display_egl_get_size(GstMfxDisplayEGL * display,
+gst_mfx_display_egl_get_size(GstMfxDisplay * display,
   guint * width_ptr, guint * height_ptr)
 {
+  GstMfxDisplayEGL *mfxEGL_display = GST_MFX_DISPLAY_EGL(display);
   GstMfxDisplayClass *const klass =
-    GST_MFX_DISPLAY_GET_CLASS(display->display);
+    GST_MFX_DISPLAY_GET_CLASS(mfxEGL_display->display);
 
   if (klass->get_size)
-    klass->get_size(display->display, width_ptr, height_ptr);
+    klass->get_size(mfxEGL_display->display, width_ptr, height_ptr);
 }
 
 static void
-gst_mfx_display_egl_get_size_mm(GstMfxDisplayEGL * display,
+gst_mfx_display_egl_get_size_mm(GstMfxDisplay * display,
   guint * width_ptr, guint * height_ptr)
 {
+  GstMfxDisplayEGL *mfxEGL_display = GST_MFX_DISPLAY_EGL(display);
   GstMfxDisplayClass *const klass =
-    GST_MFX_DISPLAY_GET_CLASS(display->display);
+    GST_MFX_DISPLAY_GET_CLASS(mfxEGL_display->display);
 
   if (klass->get_size_mm)
-    klass->get_size_mm(display->display, width_ptr, height_ptr);
+    klass->get_size_mm(mfxEGL_display->display, width_ptr, height_ptr);
 }
 
 static GstMfxWindow *
@@ -202,7 +207,7 @@ gst_mfx_display_egl_class_init(GstMfxDisplayEGLClass * klass)
   GST_DEBUG_CATEGORY_INIT(gst_debug_mfxdisplay_egl, "mfxdisplay_egl", 0,
     "EGL backend");
 
-  gst_mfx_display_class_init(dpy_class);
+  gst_mfx_display_class_init(&klass->parent_class);
 
   object_class->size = sizeof (GstMfxDisplayEGL);
   dpy_class->display_type = GST_MFX_DISPLAY_TYPE_EGL;

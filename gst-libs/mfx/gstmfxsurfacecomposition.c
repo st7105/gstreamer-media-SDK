@@ -80,7 +80,7 @@ create_subpicture (GstMfxSurfaceComposition * composition,
   if (gst_mfx_surface_has_video_memory (composition->base_surface)) {
     GstMfxDisplay *display =
         gst_mfx_surface_vaapi_get_display (composition->base_surface);
-    subpicture->surface = gst_mfx_surface_vaapi_new (display, &info);
+    subpicture->surface = gst_mfx_surface_vaapi_new (display, &info, NULL);
     gst_mfx_display_unref (display);
   }
   else {
@@ -176,7 +176,8 @@ gst_mfx_surface_composition_new (GstMfxSurface * base_surface,
   g_return_val_if_fail(base_surface != NULL, NULL);
   g_return_val_if_fail(overlay != NULL, NULL);
 
-  composition = gst_mfx_mini_object_new0(gst_mfx_surface_composition_class());
+  composition = (GstMfxSurfaceComposition *)
+                  gst_mfx_mini_object_new0(gst_mfx_surface_composition_class());
   if (!composition)
     return NULL;
 
@@ -188,7 +189,7 @@ gst_mfx_surface_composition_new (GstMfxSurface * base_surface,
 
   return composition;
 error:
-  gst_mfx_mini_object_unref(composition);
+  gst_mfx_mini_object_unref(GST_MFX_MINI_OBJECT(composition));
   return NULL;
 }
 
@@ -197,7 +198,8 @@ gst_mfx_surface_composition_ref (GstMfxSurfaceComposition * composition)
 {
   g_return_val_if_fail(composition != NULL, NULL);
 
-  return gst_mfx_mini_object_ref(GST_MFX_MINI_OBJECT(composition));
+  return (GstMfxSurfaceComposition *)
+           gst_mfx_mini_object_ref(GST_MFX_MINI_OBJECT(composition));
 }
 
 void

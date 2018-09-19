@@ -434,6 +434,9 @@ gst_mfxpostproc_ensure_filter (GstMfxPostproc * vpp)
   if (plugin->sinkpad_caps_is_raw != srcpad_has_raw_caps)
     vpp->flags |= GST_MFX_POSTPROC_FLAG_CUSTOM;
 
+  if (plugin->sinkpad_has_dmabuf && (srcpad_has_raw_caps != sinkpad_has_raw_caps))
+    vpp->flags |= GST_MFX_POSTPROC_FLAG_CUSTOM;
+
   plugin->srcpad_caps_is_raw = srcpad_has_raw_caps;
 
   vpp->filter = gst_mfx_filter_new (plugin->aggregator,
@@ -673,6 +676,8 @@ gst_mfxpostproc_transform (GstBaseTransform * trans, GstBuffer * inbuf,
   } while (GST_MFX_FILTER_STATUS_ERROR_MORE_SURFACE == status
            && GST_FLOW_OK == ret);
 
+  gst_mfx_surface_dequeue(surface);
+
 #if GST_CHECK_VERSION(1,8,0)
   gst_mfx_plugin_base_export_dma_buffer (GST_MFX_PLUGIN_BASE (vpp), outbuf);
 #endif // GST_CHECK_VERSION
@@ -762,7 +767,7 @@ gst_mfxpostproc_transform_caps_impl (GstBaseTransform * trans,
   GstCaps *out_caps, *peer_caps;
   GstMfxCapsFeature feature;
   const gchar *feature_str;
-  guint width, height, fps_n, fps_d;
+  guint width, height;
 
   /* Generate the sink pad caps, that could be fixated afterwards */
   if (direction == GST_PAD_SRC) {
@@ -801,8 +806,6 @@ gst_mfxpostproc_transform_caps_impl (GstBaseTransform * trans,
 
   gst_video_info_from_caps (&peer_vi, peer_caps);
   out_format = GST_VIDEO_INFO_FPS_N (&peer_vi);
-  fps_n = GST_VIDEO_INFO_FPS_N (&peer_vi);
-  fps_d = GST_VIDEO_INFO_FPS_D (&peer_vi);
 
   /* Update width and height from the caps */
   if (GST_VIDEO_INFO_HEIGHT (&peer_vi) != 1 &&

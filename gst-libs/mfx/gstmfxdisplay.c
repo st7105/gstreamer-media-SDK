@@ -28,6 +28,7 @@
 #include <va/va_drm.h>
 #include "gstmfxdisplay.h"
 #include "gstmfxdisplay_priv.h"
+#include "gstmfxutils_vaapi.h"
 
 #define DEBUG 1
 #include "gstmfxdebug.h"
@@ -39,7 +40,7 @@ GST_DEBUG_CATEGORY (gst_debug_mfx);
 #undef gst_mfx_display_unref
 #undef gst_mfx_display_replace
 
-static int
+int
 get_display_fd (GstMfxDisplay * display)
 {
   GstMfxDisplayPrivate *const priv = GST_MFX_DISPLAY_GET_PRIVATE (display);
@@ -338,7 +339,7 @@ gst_mfx_display_new (void)
   GstMfxDisplay *display;
 
   display = (GstMfxDisplay *)
-      gst_mfx_mini_object_new0 (gst_mfx_display_class ());
+      gst_mfx_mini_object_new0 (GST_MFX_MINI_OBJECT_CLASS(gst_mfx_display_class ()));
   if (!display)
     return NULL;
   gst_mfx_display_init (display);

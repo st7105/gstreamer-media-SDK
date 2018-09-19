@@ -613,7 +613,8 @@ gst_mfx_encoder_new (const GstMfxEncoderClass * klass,
 
   g_return_val_if_fail (aggregator != NULL, NULL);
 
-  encoder = gst_mfx_mini_object_new0 (GST_MFX_MINI_OBJECT_CLASS (klass));
+  encoder = (GstMfxEncoder *)
+              gst_mfx_mini_object_new0 (GST_MFX_MINI_OBJECT_CLASS (klass));
   if (!encoder)
     return NULL;
 
@@ -622,7 +623,7 @@ gst_mfx_encoder_new (const GstMfxEncoderClass * klass,
 
   return encoder;
 error:
-  gst_mfx_mini_object_unref(encoder);
+  gst_mfx_mini_object_unref(GST_MFX_MINI_OBJECT(encoder));
   return NULL;
 }
 
@@ -631,7 +632,8 @@ gst_mfx_encoder_ref (GstMfxEncoder * encoder)
 {
   g_return_val_if_fail (encoder != NULL, NULL);
 
-  return gst_mfx_mini_object_ref (GST_MFX_MINI_OBJECT (encoder));
+  return (GstMfxEncoder *)
+           gst_mfx_mini_object_ref (GST_MFX_MINI_OBJECT (encoder));
 }
 
 void
@@ -849,7 +851,7 @@ gst_mfx_encoder_set_encoding_params (GstMfxEncoder * encoder)
         if (!encoder->gop_size)
           encoder->gop_size = 32;
         encoder->gop_refdist =
-            encoder->gop_refdist < 0 ? 4 : encoder->gop_refdist;
+            encoder->gop_refdist < 0 ? 2 : encoder->gop_refdist;
         break;
       case GST_MFX_RATECONTROL_VCM:
         encoder->gop_refdist = 0;
@@ -886,7 +888,7 @@ gst_mfx_encoder_set_encoding_params (GstMfxEncoder * encoder)
     else {
       encoder->params.mfx.IdrInterval = encoder->idr_interval;
     }
-    encoder->params.mfx.NumRefFrame = encoder->num_refs;
+    encoder->params.mfx.NumRefFrame = CLAMP (encoder->num_refs, 0, 16);
     encoder->params.mfx.GopPicSize = encoder->gop_size;
     encoder->params.mfx.NumSlice = encoder->num_slices;
 

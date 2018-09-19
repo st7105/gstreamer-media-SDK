@@ -161,7 +161,6 @@ gst_mfx_surface_derive_mfx_frame_info(GstMfxSurface * surface,
 {
   mfxFrameInfo *frame_info = &surface->surface.Info;
 
-  frame_info->ChromaFormat = MFX_CHROMAFORMAT_YUV420;
   frame_info->FourCC =
     gst_video_format_to_mfx_fourcc(GST_VIDEO_INFO_FORMAT(info));
   frame_info->PicStruct =
@@ -169,6 +168,25 @@ gst_mfx_surface_derive_mfx_frame_info(GstMfxSurface * surface,
       GST_VIDEO_FRAME_FLAG_TFF) ? MFX_PICSTRUCT_FIELD_TFF :
       MFX_PICSTRUCT_FIELD_BFF)
     : MFX_PICSTRUCT_PROGRESSIVE;
+
+  switch (info->finfo->format) {
+    case GST_VIDEO_FORMAT_NV12:
+    case GST_VIDEO_FORMAT_YV12:
+    case GST_VIDEO_FORMAT_I420:
+      frame_info->ChromaFormat = MFX_CHROMAFORMAT_YUV420;
+      break;
+    case GST_VIDEO_FORMAT_YUY2:
+    case GST_VIDEO_FORMAT_UYVY:
+      frame_info->ChromaFormat = MFX_CHROMAFORMAT_YUV422;
+      break;
+    case GST_VIDEO_FORMAT_BGRA:
+    case GST_VIDEO_FORMAT_BGRx:
+      frame_info->ChromaFormat = MFX_CHROMAFORMAT_YUV444;
+      break;
+    default:
+      g_assert_not_reached();
+      break;
+  }
 
   frame_info->CropX = 0;
   frame_info->CropY = 0;
@@ -217,6 +235,8 @@ gst_mfx_surface_init_properties(GstMfxSurface * surface)
     }
   }
 #endif
+
+  surface->queued = 0;
 }
 
 static gboolean
@@ -286,13 +306,15 @@ gst_mfx_surface_class(void)
 GstMfxSurface *
 gst_mfx_surface_new (const GstVideoInfo * info)
 {
-  return gst_mfx_surface_new_internal(gst_mfx_surface_class(), NULL, info, NULL);
+  return gst_mfx_surface_new_internal(gst_mfx_surface_class(), NULL, info, NULL,
+            FALSE, -1);
 }
 
 GstMfxSurface *
 gst_mfx_surface_new_from_task (GstMfxTask * task)
 {
-  return gst_mfx_surface_new_internal(gst_mfx_surface_class(), NULL, NULL, task);
+  return gst_mfx_surface_new_internal(gst_mfx_surface_class(), NULL, NULL, task,
+            FALSE, -1);
 }
 
 GstMfxSurface *
@@ -305,7 +327,8 @@ gst_mfx_surface_new_from_pool(GstMfxSurfacePool * pool)
 
 GstMfxSurface *
 gst_mfx_surface_new_internal(const GstMfxSurfaceClass * klass,
-    GstMfxDisplay * display, const GstVideoInfo * info, GstMfxTask * task)
+    GstMfxDisplay * display, const GstVideoInfo * info, GstMfxTask * task,
+    gboolean is_linear, gint dri_fd)
 {
   GstMfxSurface *surface;
 
@@ -313,6 +336,10 @@ gst_mfx_surface_new_internal(const GstMfxSurfaceClass * klass,
     gst_mfx_mini_object_new0(GST_MFX_MINI_OBJECT_CLASS(klass));
   if (!surface)
     return NULL;
+
+  surface->gem_bo_handle = -1;
+  surface->is_gem_linear = is_linear;
+  surface->drm_fd = dri_fd;
 
   surface->surface_id = GST_MFX_ID_INVALID;
   if (display)
@@ -335,7 +362,7 @@ gst_mfx_surface_copy(GstMfxSurface * surface)
   g_return_val_if_fail(surface != NULL, NULL);
 
   copy = (GstMfxSurface *)
-    gst_mfx_mini_object_new0(gst_mfx_surface_class());
+    gst_mfx_mini_object_new0(GST_MFX_MINI_OBJECT_CLASS(gst_mfx_surface_class()));
   if (!copy)
     return NULL;
 
@@ -353,7 +380,7 @@ gst_mfx_surface_ref(GstMfxSurface * surface)
 {
   g_return_val_if_fail(surface != NULL, NULL);
 
-  return gst_mfx_mini_object_ref(GST_MFX_MINI_OBJECT(surface));
+  return (GstMfxSurface *) gst_mfx_mini_object_ref(GST_MFX_MINI_OBJECT(surface));
 }
 
 void
@@ -481,4 +508,27 @@ gst_mfx_surface_unmap(GstMfxSurface * surface)
       klass->unmap(surface);
       surface->mapped = FALSE;
     }
+}
+
+gboolean
+gst_mfx_surface_is_queued(GstMfxSurface * surface)
+{
+  if (!surface)
+    return FALSE;
+
+  return g_atomic_int_get(&surface->queued)? TRUE : FALSE;
+}
+
+void
+gst_mfx_surface_queue(GstMfxSurface * surface)
+{
+  if (surface)
+    g_atomic_int_set(&surface->queued, 1);
+}
+
+void
+gst_mfx_surface_dequeue(GstMfxSurface * surface)
+{
+  if (surface)
+    g_atomic_int_set(&surface->queued, 0);
 }

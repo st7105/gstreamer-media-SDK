@@ -186,7 +186,7 @@ gst_mfxsink_x11_handle_events (GstMfxSink * sink)
 #endif
     GstMfxDisplay *const display = GST_MFX_WINDOW_DISPLAY (window);
     Display *const x11_dpy =
-        gst_mfx_display_x11_get_display (GST_MFX_DISPLAY_X11 (display));
+        gst_mfx_display_x11_get_display (display);
     Window x11_win = GST_MFX_WINDOW_ID (window);
 
     /* Track MousePointer interaction */
@@ -285,8 +285,7 @@ gst_mfxsink_x11_pre_start_event_thread (GstMfxSink * sink)
     if (sink->display_type_req == GST_MFX_DISPLAY_TYPE_EGL)
       window = gst_mfx_window_egl_get_parent_window (sink->window);
 #endif
-    GstMfxDisplayX11 *const display =
-        GST_MFX_DISPLAY_X11 (GST_MFX_WINDOW_DISPLAY (window));
+    GstMfxDisplay *const display = GST_MFX_WINDOW_DISPLAY (window);
 
     gst_mfx_display_lock (GST_MFX_DISPLAY (display));
     XSelectInput (gst_mfx_display_x11_get_display (display),
@@ -305,8 +304,7 @@ gst_mfxsink_x11_pre_stop_event_thread (GstMfxSink * sink)
     if (sink->display_type_req == GST_MFX_DISPLAY_TYPE_EGL)
       window = gst_mfx_window_egl_get_parent_window (sink->window);
 #endif
-    GstMfxDisplayX11 *const display =
-        GST_MFX_DISPLAY_X11 (GST_MFX_WINDOW_DISPLAY (window));
+    GstMfxDisplay *const display = GST_MFX_WINDOW_DISPLAY (window);
 
     gst_mfx_display_lock (GST_MFX_DISPLAY (display));
     XSelectInput (gst_mfx_display_x11_get_display (display),
@@ -347,8 +345,7 @@ static gboolean
 configure_notify_event_pending (GstMfxSink * sink, Window window,
     guint width, guint height)
 {
-  GstMfxDisplayX11 *const x11_display =
-      GST_MFX_DISPLAY_X11 (sink->display);
+  GstMfxDisplay *const x11_display = GST_MFX_DISPLAY (sink->display);
   ConfigureNotifyEventPendingArgs args;
   XEvent xev;
 
@@ -370,10 +367,18 @@ configure_notify_event_pending (GstMfxSink * sink, Window window,
 static gboolean
 gst_mfxsink_x11_create_window (GstMfxSink * sink, guint width, guint height)
 {
-  g_return_val_if_fail (sink->window == NULL, FALSE);
-  sink->window = gst_mfx_window_x11_new (sink->display, width, height);
+  XID xid = 0;
+
+  if (sink->foreign_window == TRUE && sink->app_window_handle != 0) {
+    xid = sink->app_window_handle;
+    sink->window = gst_mfx_window_x11_new_with_xid (sink->display, xid);
+  } else {
+    sink->window = gst_mfx_window_x11_new (sink->display, width, height);
+  }
+
   if (!sink->window)
     return FALSE;
+
   return TRUE;
 }
 
@@ -387,7 +392,7 @@ gst_mfxsink_x11_create_window_from_handle (GstMfxSink * sink,
   XID xid = window;
 
   gst_mfx_display_lock (sink->display);
-  XGetGeometry (gst_mfx_display_x11_get_display (GST_MFX_DISPLAY_X11
+  XGetGeometry (gst_mfx_display_x11_get_display (GST_MFX_DISPLAY
           (sink->display)), xid, &rootwin, &x, &y, &width, &height, &border_width,
       &depth);
   gst_mfx_display_unlock (sink->display);
@@ -496,6 +501,7 @@ gst_mfxsink_video_overlay_set_window_handle (GstVideoOverlay * overlay,
   GstMfxSink *const sink = GST_MFXSINK (overlay);
 
   sink->foreign_window = TRUE;
+  sink->app_window_handle = window;
   if (sink->backend && sink->backend->create_window_from_handle)
     sink->backend->create_window_from_handle (sink, window);
 }
@@ -778,15 +784,21 @@ gst_mfxsink_ensure_render_rect (GstMfxSink * sink, guint width, guint height)
   GST_DEBUG ("video size %dx%d, calculated ratio %d/%d",
       sink->video_width, sink->video_height, num, den);
 
-  display_rect->width = gst_util_uint64_scale_int (height, num, den);
-  if (display_rect->width <= width) {
-    GST_DEBUG ("keeping window height");
-    display_rect->height = height;
-  } else {
-    GST_DEBUG ("keeping window width");
+  if (sink->fullscreen) {
     display_rect->width = width;
-    display_rect->height = gst_util_uint64_scale_int (width, den, num);
+    display_rect->height= height;
+  } else {
+    display_rect->width = gst_util_uint64_scale_int (height, num, den);
+    if (display_rect->width <= width) {
+      GST_DEBUG ("keeping window height");
+      display_rect->height = height;
+    } else {
+      GST_DEBUG ("keeping window width");
+      display_rect->width = width;
+      display_rect->height = gst_util_uint64_scale_int (width, den, num);
+    }
   }
+
   GST_DEBUG ("scaling video to %ux%u", display_rect->width,
       display_rect->height);
 
@@ -1013,7 +1025,7 @@ gst_mfxsink_show_frame (GstVideoSink * video_sink, GstBuffer * src_buffer)
     goto no_surface;
 
   GST_DEBUG ("render surface %" GST_MFX_ID_FORMAT,
-      GST_MFX_SURFACE_ID (surface));
+      GST_MFX_ID_ARGS(GST_MFX_SURFACE_ID (surface)));
 
   surface_rect = (GstMfxRectangle *)
       gst_mfx_surface_get_crop_rect (surface);
@@ -1045,6 +1057,7 @@ gst_mfxsink_show_frame (GstVideoSink * video_sink, GstBuffer * src_buffer)
         composite_surface ? composite_surface : surface, surface_rect))
     goto error;
 
+  gst_mfx_surface_dequeue(surface);
   ret = GST_FLOW_OK;
 done:
   gst_mfxsink_unlock (sink);
@@ -1093,6 +1106,9 @@ gst_mfxsink_destroy (GstMfxSink * sink)
   gst_mfx_display_replace (&sink->display, NULL);
 
   gst_caps_replace (&sink->caps, NULL);
+
+  sink->app_window_handle = 0;
+
   g_free (sink->display_name);
 }
 
@@ -1308,5 +1324,6 @@ gst_mfxsink_init (GstMfxSink * sink)
   sink->keep_aspect = TRUE;
   sink->no_frame_drop = FALSE;
   sink->full_color_range = FALSE;
+  sink->app_window_handle = 0;
   gst_video_info_init (&sink->video_info);
 }
